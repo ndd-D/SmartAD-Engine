@@ -43,6 +43,9 @@ smartad-agent/logs/
 # ===== 归档 =====
 smartad-agent/ai_evaluate/archive/
 
+# ===== WorkBuddy / IDE 内部数据 =====
+.workbuddy/
+
 # ===== 系统文件 =====
 .DS_Store
 Thumbs.db
