@@ -1,0 +1,45 @@
+server:
+  port: 8081
+  servlet:
+    context-path: /
+
+spring:
+  application:
+    name: smartad-server
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/smartad?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+    username: your_db_username
+    password: your_db_password
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: Asia/Shanghai
+
+mybatis-plus:
+  mapper-locations: classpath:mapper/*.xml
+  global-config:
+    db-config:
+      id-type: AUTO
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+
+# JWT配置
+smartad:
+  jwt:
+    secret: your-jwt-secret-key-here
+    expire: 86400  # 24小时，单位秒
+  ai-token: your-ai-token-here
+
+# Knife4j API文档
+knife4j:
+  enable: true
+  setting:
+    language: zh_cn
+
+logging:
+  level:
+    com.smartad: debug
+    org.springframework: info
+  file:
+    name: ./logs/smartad_app.log

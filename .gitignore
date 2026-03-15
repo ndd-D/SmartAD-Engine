@@ -1,0 +1,54 @@
+# ===== 前端 =====
+node_modules/
+dist/
+.cache/
+*.local
+
+# ===== 后端 Java =====
+target/
+*.class
+*.jar
+*.war
+.idea/
+*.iml
+*.iws
+.mvn/
+mvnw
+mvnw.cmd
+
+# ===== Python =====
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+*.egg-info/
+.eggs/
+pip-selfcheck.json
+
+# ===== 环境变量 / 敏感信息 =====
+.env
+.env.local
+.env.*.local
+# application.yml 含敏感信息，使用 application-example.yml 代替
+smartad-server/src/main/resources/application.yml
+
+# ===== 日志 =====
+*.log
+logs/
+smartad-agent/logs/
+
+# ===== 归档 =====
+smartad-agent/ai_evaluate/archive/
+
+# ===== 系统文件 =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== IDE =====
+.vscode/
+*.swp
+*.swo
