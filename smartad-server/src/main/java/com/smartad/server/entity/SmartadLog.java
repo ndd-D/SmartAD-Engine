@@ -33,6 +33,6 @@ public class SmartadLog {
     /** 扩展JSON */
     private String extra;
 
-    @TableField(fill = FieldFill.INSERT)
+    @TableField(value = "created_at", fill = FieldFill.INSERT)
     private LocalDateTime createdAt;
 }

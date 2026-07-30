@@ -30,6 +30,11 @@ public class SmartadCrowd {
 
     private String cityLevel;
 
+    private String description;
+
+    @TableField(value = "created_at")
+    private LocalDateTime createdAt;
+
     @TableField(value = "updated_at", fill = FieldFill.INSERT_UPDATE)
     private LocalDateTime updateTime;
 }

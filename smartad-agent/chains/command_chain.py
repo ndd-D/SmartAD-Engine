@@ -1,12 +1,14 @@
 """
 指令解析链（Command Parse Chain）
-核心 LCEL 管道：
-  Prompt → 标准LLM → JSON解析器 → [可选] 反思链
+支持两种模式：
+1. Fixed Chain 模式（默认）：路由 → 解析 → 反思 → 护栏，稳定可控
+2. Agent 模式：ReAct Agent 自主调用工具，灵活智能
 
 包含：
-1. 基础解析链（parse_chain）：处理常规指令
-2. 追问回答链（reply_chain）：处理追问后的重新解析
-3. 反思链（reflect_chain）：对草案进行自我审查（旗舰模型）
+- 基础解析链（parse_chain）：处理常规指令
+- 追问回答链（reply_chain）：处理追问后的重新解析
+- 反思链（reflect_chain）：对草案进行自我审查（旗舰模型）
+- Agent 模式入口：run_parse_with_agent（条件性调用）
 """
 import json
 from langchain_core.runnables import RunnableSequence, RunnableLambda
@@ -28,7 +30,7 @@ from chains.parsers import JsonOutputParser
 def build_parse_chain() -> RunnableSequence:
     """
     指令解析链：CMD_PARSE_PROMPT | 标准LLM | JSON解析器
-    输入变量: command_text, crowd_desc, history_desc
+    输入变量: command_text, crowd_knowledge, channel_knowledge, strategy_rules, crowd_desc, history_desc
     """
     return CMD_PARSE_PROMPT | get_llm_standard() | JsonOutputParser()
 
@@ -46,23 +48,22 @@ def build_reply_chain() -> RunnableSequence:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 反思链：对策略草案进行合规审查
+# 反思链：对策略草案进行自我审查
 # ──────────────────────────────────────────────────────────────────────────────
 
 def build_reflect_chain() -> RunnableSequence:
     """
     反思链：REFLECT_PROMPT | 旗舰LLM | JSON解析器
-    输入变量: command_text, draft_json
-    对生成的策略草案进行自我审查与修正
+    输入变量: command_text, strategy_rules, draft_json
     """
     return REFLECT_PROMPT | get_llm_heavy() | JsonOutputParser()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 带反思的完整解析管道
+# Agent 模式入口
 # ──────────────────────────────────────────────────────────────────────────────
 
-async def run_parse_with_reflection(
+async def run_parse_with_agent(
     command_text: str,
     crowd_list: list[dict],
     history_data: list[dict],
@@ -71,12 +72,61 @@ async def run_parse_with_reflection(
     answer: str = "",
 ) -> dict:
     """
-    完整解析流程（含反思迭代）：
+    使用 ReAct Agent 进行指令解析
+    Agent 自主决定调用哪些工具、以什么顺序
+    """
+    try:
+        from agent.smartad_agent import get_agent
+        agent = get_agent()
+
+        chat_history = []
+        if use_reply and question:
+            chat_history = [
+                ("assistant", f'{{"hasQuestion": true, "question": "{question}", "strategies": []}}'),
+                ("user", answer),
+            ]
+
+        result = await agent.ainvoke(
+            command_text=command_text,
+            chat_history=chat_history,
+        )
+
+        logger.info(
+            f"[AgentParse] 完成: strategies={len(result.get('strategies', []))}, "
+            f"hasQuestion={result.get('hasQuestion')}, "
+            f"steps={result.get('_agent_steps', 0)}"
+        )
+        return result
+
+    except Exception as e:
+        logger.error(f"[AgentParse] Agent 执行失败，降级为 Fixed Chain: {e}")
+        return await run_parse_fixed(
+            command_text=command_text,
+            crowd_list=crowd_list,
+            history_data=history_data,
+            use_reply=use_reply,
+            question=question,
+            answer=answer,
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Fixed Chain 模式（原始实现）
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def run_parse_fixed(
+    command_text: str,
+    crowd_list: list[dict],
+    history_data: list[dict],
+    use_reply: bool = False,
+    question: str = "",
+    answer: str = "",
+) -> dict:
+    """
+    固定链路解析流程（含反思迭代）：
     1. 调用解析链生成策略草案
     2. 若草案不为空，调用反思链审查
     3. 最多重试 settings.reflect_max_iterations 次
-
-    返回最终 result dict，格式同原 parse_chain 输出
     """
     parse_chain = build_parse_chain()
     reply_chain = build_reply_chain()
@@ -105,6 +155,7 @@ async def run_parse_with_reflection(
         try:
             reflected = await reflect_chain.ainvoke({
                 "command_text": command_text,
+                "strategy_rules": _extract_strategy_rules(result),
                 "draft_json": json.dumps(result, ensure_ascii=False),
             })
             if reflected and reflected.get("strategies"):
@@ -116,3 +167,50 @@ async def run_parse_with_reflection(
             break
 
     return result
+
+
+def _extract_strategy_rules(result: dict) -> str:
+    """从当前 Prompt 配置中提取策略规则（用于反思链）"""
+    from rag.knowledge import STRATEGY_RULES
+    return STRATEGY_RULES
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 统一入口（根据配置自动选择 Agent 或 Fixed Chain）
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def run_parse_with_reflection(
+    command_text: str,
+    crowd_list: list[dict],
+    history_data: list[dict],
+    use_reply: bool = False,
+    question: str = "",
+    answer: str = "",
+) -> dict:
+    """
+    完整解析流程（自动模式选择）：
+    - agent_enabled=True  → ReAct Agent 模式
+    - agent_enabled=False → Fixed Chain 模式（路由→解析→反思）
+    - Agent 失败时自动降级为 Fixed Chain
+    """
+    if settings.agent_enabled:
+        try:
+            return await run_parse_with_agent(
+                command_text=command_text,
+                crowd_list=crowd_list,
+                history_data=history_data,
+                use_reply=use_reply,
+                question=question,
+                answer=answer,
+            )
+        except Exception as e:
+            logger.warning(f"[ParseChain] Agent 模式降级为 Fixed Chain: {e}")
+
+    return await run_parse_fixed(
+        command_text=command_text,
+        crowd_list=crowd_list,
+        history_data=history_data,
+        use_reply=use_reply,
+        question=question,
+        answer=answer,
+    )

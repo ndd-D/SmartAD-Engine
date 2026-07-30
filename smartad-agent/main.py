@@ -1,10 +1,11 @@
 """
-SmartAD AI Agent 主入口（LangChain 重构版）
+SmartAD AI Agent 主入口（LangChain + RAG + Agent 重构版）
 分层架构说明：
-  核心层：LangChain LCEL 链（路由/解析/评估/反思）
-  扩展层：RESTful 接口对接 Java 后端
+  核心层：LangChain LCEL 链 + ReAct Agent（路由/解析/评估/反思）
+  RAG层：Chroma 向量库 + 语义检索 + 动态知识注入
+  扩展层：RESTful 接口对接 Java 后端 + Redis Stream 事件驱动
   保障层：护栏(guardrails) + 缓存(cache) + 监控(monitoring) + 异常处理
-  优化层：分级模型（轻量/标准/旗舰） + 并行评估 + 缓存复用
+  优化层：分级模型（轻量/标准/旗舰） + 并行评估 + 缓存复用 + Prometheus
 """
 import sys
 import uvicorn
@@ -34,15 +35,17 @@ logger.add(
 app = FastAPI(
     title="SmartAD AI Agent",
     description=(
-        "智能广告投放 AI 服务 - 基于 LangChain LCEL 分层架构\n\n"
+        "智能广告投放 AI 服务 - 基于 LangChain LCEL + RAG + Agent 架构\n\n"
         "核心能力：\n"
-        "- 自然语言指令解析 → 结构化投放策略草案（含路由/解析/反思链）\n"
+        "- RAG 增强的指令解析 → 结构化投放策略草案（含路由/解析/反思链）\n"
+        "- ReAct Agent 自主决策 → 工具调用（查人群/查报表/调参数）\n"
         "- 策略效果并行评估 + 自动调参建议\n"
         "- 风险告警并行检测\n"
         "- 输入/输出护栏 + 参数合规校验\n"
-        "- 多级缓存（人群/历史/报表）降低后端压力"
+        "- 多级缓存（人群/历史/报表）降低后端压力\n"
+        "- Prometheus 监控 + 可观测性"
     ),
-    version="2.0.0",
+    version="3.0.0",
 )
 
 app.add_middleware(
@@ -63,8 +66,26 @@ async def on_startup():
         f"配置摘要: model={settings.deepseek_model}, "
         f"model_light={settings.deepseek_model_light}, "
         f"model_heavy={settings.deepseek_model_heavy}, "
-        f"poll={settings.poll_interval}s, port={settings.port}"
+        f"poll={settings.poll_interval}s, port={settings.port}, "
+        f"rag_enabled={settings.rag_enabled}, "
+        f"agent_enabled={settings.agent_enabled}, "
+        f"event_driven={settings.event_driven_enabled}"
     )
+
+    # ── 初始化 RAG 向量库 ────────────────────────────────────────────────
+    if settings.rag_enabled:
+        try:
+            from rag.retriever import get_retriever
+            retriever = get_retriever()
+            success = retriever.initialize()
+            if success:
+                logger.info("[RAG] 向量库初始化成功，知识检索已启用")
+            else:
+                logger.warning("[RAG] 向量库初始化失败，降级为关键词匹配模式")
+        except Exception as e:
+            logger.warning(f"[RAG] 向量库初始化异常: {e}")
+
+    # ── 启动调度器 ──────────────────────────────────────────────────────
     start_scheduler()
     logger.info(f"SmartAD AI Agent 启动完成，监听端口: {settings.port}")
 

@@ -1,14 +1,26 @@
 """
-Prompt 构建模块（LangChain LCEL 版）
-使用 ChatPromptTemplate 替换裸字符串拼接，支持变量注入和复用
+Prompt 构建模块（LangChain LCEL 版 + RAG 增强）
+- 使用 ChatPromptTemplate 替换裸字符串拼接
+- 通过 KnowledgeRetriever 动态检索知识，替代硬编码常量
+- 保持函数签名向后兼容
 """
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from rag.knowledge import CROWD_KNOWLEDGE, CHANNEL_KNOWLEDGE, STRATEGY_RULES
 
+# RAG 检索器延迟导入（避免启动时未初始化问题）
+_rag_retriever = None
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 工具函数：将列表数据格式化为文本
-# ──────────────────────────────────────────────────────────────────────────────
+
+def _get_rag_retriever():
+    global _rag_retriever
+    if _rag_retriever is None:
+        try:
+            from rag.retriever import get_retriever
+            _rag_retriever = get_retriever()
+        except Exception:
+            _rag_retriever = None
+    return _rag_retriever
+
 
 def _format_crowd_list(crowd_list: list[dict]) -> str:
     if not crowd_list:
@@ -49,6 +61,23 @@ def _format_report(report_data: list[dict], fields: list[str] | None = None) -> 
     return "\n".join(lines)
 
 
+def _rag_enrich_knowledge(command_text: str = "", crowd_list: list[dict] | None = None) -> dict[str, str]:
+    """
+    使用 RAG 检索增强知识上下文
+    返回增强后的 {crowd_knowledge, channel_knowledge, strategy_rules}
+    """
+    retriever = _get_rag_retriever()
+    if retriever is None:
+        return {
+            "crowd_knowledge": CROWD_KNOWLEDGE,
+            "channel_knowledge": CHANNEL_KNOWLEDGE,
+            "strategy_rules": STRATEGY_RULES,
+        }
+
+    ctx = retriever.get_full_context(command_text=command_text, crowd_list=crowd_list)
+    return ctx
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 路由 Prompt：判断指令复杂度（轻量模型使用）
 # ──────────────────────────────────────────────────────────────────────────────
@@ -75,20 +104,20 @@ ROUTE_PROMPT = ChatPromptTemplate.from_messages([
 # 指令解析 Prompt：自然语言 → 策略草案（标准模型使用）
 # ──────────────────────────────────────────────────────────────────────────────
 
-_CMD_PARSE_SYSTEM = f"""\
+_CMD_PARSE_SYSTEM = """\
 你是一个专业的智能广告投放 AI，名字叫 SmartAD Engine。
 
-{CROWD_KNOWLEDGE}
+{crowd_knowledge}
 
-{CHANNEL_KNOWLEDGE}
+{channel_knowledge}
 
-{STRATEGY_RULES}
+{strategy_rules}
 
 ## 当前可用人群画像
-{{crowd_desc}}
+{crowd_desc}
 
 ## 历史投放效果数据（聚合均值）
-{{history_desc}}
+{history_desc}
 
 ## 你的任务
 根据用户下发的广告投放指令，生成一份或多份结构化投放策略草案。
@@ -130,7 +159,6 @@ _CMD_REPLY_HUMAN_ANSWER = "回答：{answer}"
 CMD_REPLY_PROMPT = ChatPromptTemplate.from_messages([
     SystemMessagePromptTemplate.from_template(_CMD_PARSE_SYSTEM),
     HumanMessagePromptTemplate.from_template(_CMD_PARSE_HUMAN),
-    # assistant 追问轮（动态插入，见 build_command_reply_messages）
     ("assistant", '{{"hasQuestion": true, "question": "{question}", "strategies": []}}'),
     HumanMessagePromptTemplate.from_template(_CMD_REPLY_HUMAN_ANSWER),
 ])
@@ -140,11 +168,11 @@ CMD_REPLY_PROMPT = ChatPromptTemplate.from_messages([
 # 反思 Prompt：对策略草案进行自我审查（旗舰模型使用）
 # ──────────────────────────────────────────────────────────────────────────────
 
-_REFLECT_SYSTEM = f"""\
+_REFLECT_SYSTEM = """\
 你是一个广告投放策略审核专家。
 你的任务是审查 AI 生成的投放策略草案，检查是否符合以下规则：
 
-{STRATEGY_RULES}
+{strategy_rules}
 
 如果策略存在问题，返回修正后的策略；若策略合理，原样返回。
 输出与输入相同的 JSON 格式，不要输出任何 JSON 以外的内容。"""
@@ -166,20 +194,20 @@ REFLECT_PROMPT = ChatPromptTemplate.from_messages([
 # 策略评估 Prompt（标准模型）
 # ──────────────────────────────────────────────────────────────────────────────
 
-_EVAL_SYSTEM = f"""\
+_EVAL_SYSTEM = """\
 你是一个广告投放效果分析 AI。
 
-{STRATEGY_RULES}
+{strategy_rules}
 
 ## 当前策略信息
-- 策略ID: {{strategy_id}}
-- 人群标签: {{crowd_tag}}
-- 渠道: {{channel}}
-- 日预算: {{budget_day}} 元
-- 当前出价: {{bid_price}} 分
+- 策略ID: {strategy_id}
+- 人群标签: {crowd_tag}
+- 渠道: {channel}
+- 日预算: {budget_day} 元
+- 当前出价: {bid_price} 分
 
 ## 近期投放报表
-{{report_desc}}
+{report_desc}
 
 ## 你的任务
 评估当前策略的投放效果，判断是否需要调整。
@@ -212,19 +240,19 @@ EVALUATE_PROMPT = ChatPromptTemplate.from_messages([
 # 告警检测 Prompt（标准模型）
 # ──────────────────────────────────────────────────────────────────────────────
 
-_ALERT_SYSTEM = f"""\
+_ALERT_SYSTEM = """\
 你是一个广告投放风险监控 AI。
 
-{STRATEGY_RULES}
+{strategy_rules}
 
 ## 当前策略
-- 策略ID: {{strategy_id}}
-- 人群标签: {{crowd_tag}}
-- 渠道: {{channel}}
-- 日预算: {{budget_day}} 元
+- 策略ID: {strategy_id}
+- 人群标签: {crowd_tag}
+- 渠道: {channel}
+- 日预算: {budget_day} 元
 
 ## 近期报表
-{{report_desc}}
+{report_desc}
 
 ## 你的任务
 判断该策略当前是否存在风险需要告警。
@@ -232,7 +260,7 @@ _ALERT_SYSTEM = f"""\
 **输出格式（严格 JSON）**：
 {{{{
   "hasAlert": true,
-  "alertType": "low_roi",
+  "alertType": "low_ctr",
   "alertLevel": "warning",
   "alertMessage": "过去3天ROI持续低于1.0，建议暂停或降低出价"
 }}}}
@@ -259,8 +287,13 @@ def build_command_parse_vars(
     crowd_list: list[dict],
     history_data: list[dict],
 ) -> dict:
+    """构建解析链变量（RAG 增强版）"""
+    rag_ctx = _rag_enrich_knowledge(command_text=command_text, crowd_list=crowd_list)
     return {
         "command_text": command_text,
+        "crowd_knowledge": rag_ctx["crowd_knowledge"],
+        "channel_knowledge": rag_ctx["channel_knowledge"],
+        "strategy_rules": rag_ctx["strategy_rules"],
         "crowd_desc": _format_crowd_list(crowd_list),
         "history_desc": _format_history(history_data),
     }
@@ -273,32 +306,47 @@ def build_command_reply_vars(
     crowd_list: list[dict],
     history_data: list[dict],
 ) -> dict:
+    """构建追问回答变量（RAG 增强版）"""
+    rag_ctx = _rag_enrich_knowledge(command_text=command_text, crowd_list=crowd_list)
     return {
         "command_text": command_text,
         "question": question,
         "answer": answer,
+        "crowd_knowledge": rag_ctx["crowd_knowledge"],
+        "channel_knowledge": rag_ctx["channel_knowledge"],
+        "strategy_rules": rag_ctx["strategy_rules"],
         "crowd_desc": _format_crowd_list(crowd_list),
         "history_desc": _format_history(history_data),
     }
 
 
 def build_evaluate_vars(strategy: dict, report_data: list[dict]) -> dict:
+    """构建评估链变量（RAG 增强版）"""
+    rag_ctx = _rag_enrich_knowledge(
+        command_text=f"{strategy.get('crowdTag', '')} {strategy.get('channel', '')}"
+    )
     return {
         "strategy_id": strategy.get("strategyId"),
         "crowd_tag": strategy.get("crowdTag"),
         "channel": strategy.get("channel"),
         "budget_day": strategy.get("budgetDay"),
         "bid_price": strategy.get("bidPrice"),
+        "strategy_rules": rag_ctx["strategy_rules"],
         "report_desc": _format_report(report_data),
     }
 
 
 def build_alert_vars(strategy: dict, report_data: list[dict]) -> dict:
+    """构建告警链变量（RAG 增强版）"""
+    rag_ctx = _rag_enrich_knowledge(
+        command_text=f"{strategy.get('crowdTag', '')} {strategy.get('channel', '')}"
+    )
     return {
         "strategy_id": strategy.get("strategyId"),
         "crowd_tag": strategy.get("crowdTag"),
         "channel": strategy.get("channel"),
         "budget_day": strategy.get("budgetDay"),
+        "strategy_rules": rag_ctx["strategy_rules"],
         "report_desc": _format_report(
             report_data,
             fields=["reportDate", "ctr", "roi", "cost", "conversions"],
@@ -307,7 +355,7 @@ def build_alert_vars(strategy: dict, report_data: list[dict]) -> dict:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 向后兼容函数（供旧代码调用，内部已切换到 ChatPromptTemplate）
+# 向后兼容函数
 # ──────────────────────────────────────────────────────────────────────────────
 
 def build_command_parse_prompt(command_text: str, crowd_list: list[dict], history_data: list[dict]) -> list[dict]:
